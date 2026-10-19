@@ -1,7 +1,7 @@
 import { ArrowDownRight, ArrowUpRight, History } from 'lucide-react';
 import { useCreatorActivityFeed } from '@/hooks/useCreatorActivityFeed';
 import { creatorActivityService } from '@/services/creatorActivity.service';
-import { formatRelativeTime } from '@/utils/time.utils';
+import { useRelativeTime } from '@/hooks/useRelativeTime';
 import { formatCreatorHandle } from '@/utils/handleDisplay.utils';
 
 export interface CreatorActivityFeedProps {
@@ -9,6 +9,48 @@ export interface CreatorActivityFeedProps {
 }
 
 const SKELETON_ROW_COUNT = 3;
+
+interface ActivityRowProps {
+	trade: ReturnType<typeof useCreatorActivityFeed>['trades'][number];
+}
+
+function ActivityRow({ trade }: ActivityRowProps) {
+	const relativeTime = useRelativeTime(trade.timestamp);
+
+	return (
+		<div
+			key={trade.id}
+			data-testid={`creator-activity-item-${trade.id}`}
+			className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.02] p-4"
+		>
+			<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white/5">
+				{trade.type === 'buy' ? (
+					<ArrowUpRight className="size-4 text-emerald-400" />
+				) : (
+					<ArrowDownRight className="size-4 text-rose-400" />
+				)}
+			</div>
+			<div className="min-w-0 flex-1">
+				<div className="flex items-center gap-2">
+					<span className="font-semibold text-white">
+						{trade.type === 'buy' ? 'Buy' : 'Sell'}
+					</span>
+					<span className="text-white/40">•</span>
+					<span className="text-white/90">
+						{formatCreatorHandle(trade.traderHandle)}
+					</span>
+				</div>
+				<div className="mt-1 flex items-center gap-3 text-xs text-white/50">
+					<span>{trade.amount} keys</span>
+					<span className="text-white/30">•</span>
+					<span>{trade.price} XLM</span>
+					<span className="text-white/30">•</span>
+					<span>{relativeTime}</span>
+				</div>
+			</div>
+		</div>
+	);
+}
 
 function ActivityFeedSkeletonRows() {
 	return (
@@ -40,7 +82,9 @@ function ActivityFeedSkeletonRows() {
  *               the issue spec.
  *   settled, trades.length > 0  -> real rows.
  */
-const CreatorActivityFeed: React.FC<CreatorActivityFeedProps> = ({ creatorId }) => {
+const CreatorActivityFeed: React.FC<CreatorActivityFeedProps> = ({
+	creatorId,
+}) => {
 	const { trades, isLoading } = useCreatorActivityFeed(creatorId, id =>
 		creatorActivityService.getCreatorActivity(id)
 	);
@@ -68,37 +112,7 @@ const CreatorActivityFeed: React.FC<CreatorActivityFeedProps> = ({ creatorId }) 
 	return (
 		<div data-testid="creator-activity-feed" className="space-y-2">
 			{trades.map(trade => (
-				<div
-					key={trade.id}
-					data-testid={`creator-activity-item-${trade.id}`}
-					className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.02] p-4"
-				>
-					<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white/5">
-						{trade.type === 'buy' ? (
-							<ArrowUpRight className="size-4 text-emerald-400" />
-						) : (
-							<ArrowDownRight className="size-4 text-rose-400" />
-						)}
-					</div>
-					<div className="min-w-0 flex-1">
-						<div className="flex items-center gap-2">
-							<span className="font-semibold text-white">
-								{trade.type === 'buy' ? 'Buy' : 'Sell'}
-							</span>
-							<span className="text-white/40">•</span>
-							<span className="text-white/90">
-								{formatCreatorHandle(trade.traderHandle)}
-							</span>
-						</div>
-						<div className="mt-1 flex items-center gap-3 text-xs text-white/50">
-							<span>{trade.amount} keys</span>
-							<span className="text-white/30">•</span>
-							<span>{trade.price} XLM</span>
-							<span className="text-white/30">•</span>
-							<span>{formatRelativeTime(trade.timestamp)}</span>
-						</div>
-					</div>
-				</div>
+				<ActivityRow key={trade.id} trade={trade} />
 			))}
 		</div>
 	);

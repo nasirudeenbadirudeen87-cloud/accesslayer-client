@@ -1,8 +1,18 @@
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { useEffect, useState } from 'react';
-import { useCreatorDetail } from '@/hooks/useCreators';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCreatorDetail, usePriceHistory } from '@/hooks/useCreators';
+import { useKeyFreeze } from '@/hooks/useKeyFreeze';
+import {
+	useKeyPriceFloor,
+	resolvePriceFloorStroops,
+	isPriceFloorActive,
+} from '@/hooks/useKeyPriceFloor';
+import type { TradeSide } from '@/components/common/TradeDialog';
 import { useRecentlyViewed } from '@/hooks/useRecentlyViewed';
 import { useCreatorProfileStaleIndicator } from '@/hooks/useCreatorProfileStaleIndicator';
+import { useOnChainMetadata } from '@/hooks/useOnChainMetadata';
+import { resolveIpfsUrl } from '@/utils/ipfs.utils';
 import CreatorBreadcrumb from '@/components/common/CreatorBreadcrumb';
 import CreatorProfileHeader from '@/components/common/CreatorProfileHeader';
 import CreatorProfileInfoGrid from '@/components/common/CreatorProfileInfoGrid';
@@ -14,8 +24,14 @@ import KeySimulationTool from '@/components/common/KeySimulationTool';
 import BuyCooldownCountdown from '@/components/common/BuyCooldownCountdown';
 import KeyHolderList from '@/components/common/KeyHolderList';
 import HolderConcentrationChart from '@/components/common/HolderConcentrationChart';
+import HolderSnapshotHistory from '@/components/common/HolderSnapshotHistory';
+import GraduationCelebration from '@/components/common/GraduationCelebration';
 import StakingRewardsSection from '@/components/common/StakingRewardsSection';
+import StakingVaultPanel from '@/components/common/StakingVaultPanel';
 import DeprecationNotice from '@/components/common/DeprecationNotice';
+import DeprecationBanner from '@/components/common/DeprecationBanner';
+import SubscriptionAccessGate from '@/components/common/SubscriptionAccessGate';
+import SectionErrorBoundary from '@/components/common/SectionErrorBoundary';
 import { isKeyDeprecated } from '@/utils/keyDeprecation.utils';
 import { Button } from '@/components/ui/button';
 import { CreatorDashboardSkeleton } from '@/components/common/CreatorSkeleton';
@@ -24,15 +40,24 @@ import {
 	resolveCreatorKeyPriceStroops,
 	formatDisplayKeyPrice,
 } from '@/utils/keyPriceDisplay.utils';
+import {
+	resolveHighestBid,
+	formatAuctionBidAmount,
+} from '@/utils/auctionBid.utils';
 import KeyDetailPageErrorBoundary from '@/components/common/KeyDetailPageErrorBoundary';
 import { ApiError } from '@/services/api.service';
 import WatchlistButton from '@/components/common/WatchlistButton';
+import AuctionPhaseSection from '@/components/common/AuctionPhaseSection';
+import { useAuctionPhase } from '@/hooks/useAuctionPhase';
 import { useNavigationTiming } from '@/hooks/useNavigationTiming';
 import { useKeyHolders } from '@/hooks/useKeyHolders';
 import { useProfileStore } from '@/hooks/useProfileStore';
 import { useWalletHoldings, useTradeMutation } from '@/hooks/useWallet';
 import CoCreatorSection from '@/components/creator/CoCreatorSection';
 import ShareTwitterButton from '@/components/common/ShareTwitterButton';
+import { PriceHistoryChart } from '@/components/common/PriceHistoryChart';
+import { BondingCurvePriceChart } from '@/components/common/BondingCurvePriceChart';
+import type { PriceHistoryInterval } from '@/services/course.service';
 import TradeDialog from '@/components/common/TradeDialog';
 import SpreadIndicator from '@/components/common/SpreadIndicator';
 import OraclePriceIndicator from '@/components/common/OraclePriceIndicator';
@@ -41,19 +66,38 @@ import showToast from '@/utils/toast.util';
 import { getSignatureErrorMessage } from '@/utils/errorHandling.utils';
 import { usePurchaseConfetti } from '@/hooks/usePurchaseConfetti';
 import { useDocumentTitle } from '@/hooks/useDocumentTitle';
-import { useKeyTwap } from '@/hooks/useKeyTwap';
+import { useKeyTwap, type TwapWindow } from '@/hooks/useKeyTwap';
 import { useKeyStats } from '@/hooks/useKeyStats';
+import { useKeyUniqueTraders } from '@/hooks/useKeyUniqueTraders';
 import { useKeyConfig } from '@/hooks/useKeyConfig';
 import KeyStatsPanel from '@/components/common/KeyStatsPanel';
 import Skeleton from '@/components/ui/skeleton';
 import { Tooltip } from '@/components/ui/tooltip';
+import { UnavailableAction } from '@/components/ui/unavailable-action';
 import GraduatedCurveMilestoneChart from '@/components/common/GraduatedCurveMilestoneChart';
 import KeyDeprecationBanner from '@/components/common/KeyDeprecationBanner';
+import KeyTradingPausedBanner from '@/components/common/KeyTradingPausedBanner';
+import KeyFreezeStatusBanner from '@/components/common/KeyFreezeStatusBanner';
+import AddToBundleButton from '@/components/common/AddToBundleButton';
 import MergeProposalBanner from '@/components/common/MergeProposalBanner';
 import KeyBuybackModal from '@/components/common/KeyBuybackModal';
 import type { KeyBuybackReceipt } from '@/hooks/useKeyBuyback';
 import { usePerformanceBond } from '@/hooks/usePerformanceBond';
 import PerformanceBondPanel from '@/components/common/PerformanceBondPanel';
+import WhitelistStatusBadge from '@/components/common/WhitelistStatusBadge';
+import ShareModal from '@/components/common/ShareModal';
+import PriceAlertButton from '@/components/common/PriceAlertButton';
+import {
+	useTradeCooldownStatus,
+	invalidateTradeCooldownStatus,
+	resolveActiveTradeCooldown,
+} from '@/hooks/useTradeCooldownStatus';
+import {
+	isActiveCooldown,
+	type ActiveTradeCooldown,
+} from '@/utils/tradeCooldown.utils';
+import TradeCooldownButton from '@/components/common/TradeCooldownButton';
+import { useAccount } from 'wagmi';
 
 function CreatorDetailPageContent() {
 	usePurchaseConfetti();
@@ -61,10 +105,22 @@ function CreatorDetailPageContent() {
 	const { id } = useParams<{ id: string }>();
 	const location = useLocation();
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
+
 	const [hasMounted, setHasMounted] = useState(false);
 	const [buybackModalOpen, setBuybackModalOpen] = useState(false);
 	const [recentSettlement, setRecentSettlement] =
 		useState<KeyBuybackReceipt | null>(null);
+	const [shareModalOpen, setShareModalOpen] = useState(false);
+	const [lastPurchasedAmount, setLastPurchasedAmount] = useState<
+		number | null
+	>(null);
+	const [deprecationDismissed, setDeprecationDismissed] = useState(false);
+	const [buyDialogOpen, setBuyDialogOpen] = useState(false);
+	const [tradeSide, setTradeSide] = useState<TradeSide>('buy');
+	const [tradeSubmitting, setTradeSubmitting] = useState(false);
+	const [interval, setInterval] = useState<PriceHistoryInterval>('24h');
+
 	const {
 		data: creator,
 		isLoading,
@@ -72,6 +128,21 @@ function CreatorDetailPageContent() {
 		isFetching,
 		refetch,
 	} = useCreatorDetail(id || '');
+
+	const { data: priceHistory, isLoading: isPriceHistoryLoading } =
+		usePriceHistory(id || '', interval);
+
+	// Active admin freeze (#1121): drives the banner and disables trading.
+	const keyFreeze = useKeyFreeze(creator);
+
+	// Configured price floor for this key (#1152)
+	const { data: priceFloorData } = useKeyPriceFloor(id || '');
+	const priceFloorStroops = resolvePriceFloorStroops(priceFloorData);
+	const isFloorActive = isPriceFloorActive(
+		creator ? resolveCreatorKeyPriceStroops(creator) : null,
+		priceFloorStroops
+	);
+
 	useNavigationTiming('creator_profile');
 	useDocumentTitle(creator ? `${creator.title} — AccessLayer` : null);
 
@@ -81,9 +152,9 @@ function CreatorDetailPageContent() {
 
 	const recordVisit = useRecentlyViewed(state => state.addKey);
 
-	// Record this key as recently viewed once the detail data is available.
 	useEffect(() => {
 		if (!creator) return;
+
 		recordVisit({
 			id: creator.id,
 			title: creator.title || creator.name || 'Unnamed creator',
@@ -99,33 +170,38 @@ function CreatorDetailPageContent() {
 	const { holders, hasNextPage, isFetchingNextPage, fetchNextPage } =
 		useKeyHolders(id || '');
 
-	// User holdings for Share to X button
 	const profile = useProfileStore(state => state.profile);
-	const userAddress = profile?.id;
+	const { address: connectedWalletAddress } = useAccount();
+	const userAddress = connectedWalletAddress ?? profile?.id;
+
 	const { data: holdings = [] } = useWalletHoldings(userAddress ?? '');
+
 	const userPosition = holdings.find(h => h.creatorId === (id || ''));
 	const holdingsCount = userPosition?.quantity ?? 0;
-	// Per-user buy cooldown (#873): prefer the user's own position-level
-	// value; fall back to a creator-wide cooldown if the backend doesn't yet
-	// return a per-user one. Only shown for authenticated users.
+
 	const nextBuyAllowedAt =
 		userPosition?.nextBuyAllowedAt ?? creator?.nextBuyAllowedAt ?? null;
-	const { data: twap, isLoading: isTwapLoading } = useKeyTwap(id || '');
+
+	const [twapWindow, setTwapWindow] = useState<TwapWindow>('24h');
+	const { data: twap, isLoading: isTwapLoading } = useKeyTwap(id || '', twapWindow);
+
 	const {
 		data: keyStats,
 		isLoading: isKeyStatsLoading,
 		isError: isKeyStatsError,
 	} = useKeyStats(id || '');
-	// Live key config powers the bid-ask spread shown next to the buy
-	// action and inside the trade dialog (#951).
+
+	const { data: uniqueTraders, isLoading: isUniqueTradersLoading } =
+		useKeyUniqueTraders(id || '');
+
 	const { data: keyConfig, isLoading: isKeyConfigLoading } = useKeyConfig(
 		id || ''
 	);
+
 	const spotPriceStroops = creator
 		? resolveCreatorKeyPriceStroops(creator)
 		: null;
-	// External oracle price shown alongside the bonding-curve spot price so a
-	// significant divergence is visible before trading (#967).
+
 	const {
 		comparison: oracleComparison,
 		freshness: oracleFreshness,
@@ -133,36 +209,170 @@ function CreatorDetailPageContent() {
 		isLoading: isOracleLoading,
 	} = useKeyOraclePrice(id || '', { spotPriceStroops });
 
-	// Performance bond status for creator key protection (#975)
 	const {
 		data: performanceBondData,
 		isLoading: isPerformanceBondLoading,
 		isError: isPerformanceBondError,
 	} = usePerformanceBond(id || '');
+
 	const performanceBond =
 		performanceBondData ?? creator?.performanceBond ?? null;
 
-	// Track stale data indicator
-	const { shouldShowBadge, handleRefetch } = useCreatorProfileStaleIndicator(
-		id || '',
-		isFetching,
-		() => refetch()
+	const { phase: auctionPhase } = useAuctionPhase({
+		auctionPrice: creator?.auctionPrice ?? null,
+		auctionSupply: creator?.auctionSupply ?? null,
+		auctionSold: creator?.auctionSold ?? null,
+		auctionEndsAt: creator?.auctionEndsAt ?? null,
+	});
+
+	const isWhitelistGateActive = Boolean(
+		creator?.isWhitelistEnabled ??
+		creator?.whitelistEnabled ??
+		creator?.earlyAccessEnabled ??
+		false
 	);
 
-	const [buyDialogOpen, setBuyDialogOpen] = useState(false);
-	const [tradeSubmitting, setTradeSubmitting] = useState(false);
-	const tradeMutation = useTradeMutation(userAddress ?? 'demo-wallet');
+	const whitelistEntries = creator?.whitelist ?? [];
 
-	const handleConfirmBuy = async (
+	const isUserWhitelisted = Boolean(
+		userAddress &&
+		(whitelistEntries.some(
+			entry =>
+				entry.walletAddress?.toUpperCase() === userAddress.toUpperCase()
+		) ||
+			(creator?.earlyAccessWhitelist ?? []).some(
+				address => address.toLowerCase() === userAddress.toLowerCase()
+			) ||
+			(creator?.instructorId &&
+				creator.instructorId.toUpperCase() === userAddress.toUpperCase()))
+	);
+
+	const publicLaunchTimestamp = creator?.publicLaunchDate
+		? Date.parse(creator.publicLaunchDate)
+		: null;
+
+	const hasValidPublicLaunchDate =
+		publicLaunchTimestamp != null && Number.isFinite(publicLaunchTimestamp);
+
+	const isPublicLaunchPending =
+		hasValidPublicLaunchDate && publicLaunchTimestamp > Date.now();
+
+	const isEarlyAccessRestricted =
+		creator?.earlyAccessEnabled === true &&
+		(!hasValidPublicLaunchDate || isPublicLaunchPending);
+
+	const isLockedOut =
+		isWhitelistGateActive &&
+		!isUserWhitelisted &&
+		(isEarlyAccessRestricted || !creator?.publicLaunchDate);
+
+	const buyDisabledReason = !userAddress
+		? 'Connect your wallet to buy this key.'
+		: isLockedOut
+			? 'Early access is restricted to approved whitelisted wallets.'
+			: undefined;
+
+	const {
+		data: onChainMetadata,
+		isLoading: isOnChainLoading,
+		isError: isOnChainError,
+		refetch: refetchOnChainMetadata,
+	} = useOnChainMetadata(id || '');
+
+	const isFallbackActive = isOnChainError || !onChainMetadata;
+	const metadata = onChainMetadata ?? {};
+
+	const displayName =
+		metadata.name || creator?.title || creator?.name || 'Unnamed creator';
+
+	const displaySymbol = metadata.symbol;
+
+	const displayDescription =
+		metadata.description || creator?.description || creator?.bio;
+
+	const rawAvatar =
+		metadata.image ||
+		metadata.imageCid ||
+		metadata.image_cid ||
+		metadata.ipfsCid ||
+		metadata.ipfs_cid ||
+		metadata.avatarUri ||
+		metadata.avatar_uri ||
+		metadata.cid;
+
+	const displayAvatar =
+		resolveIpfsUrl(rawAvatar) || creator?.avatarUri || creator?.thumbnail;
+
+	const { shouldShowBadge, handleRefetch } = useCreatorProfileStaleIndicator(
+		id || '',
+		isFetching || isOnChainLoading,
+		() => {
+			void refetch();
+			void refetchOnChainMetadata();
+		}
+	);
+
+	const tradeMutation = useTradeMutation(connectedWalletAddress ?? '');
+
+	const { data: tradeCooldownStatus } = useTradeCooldownStatus(
+		id || '',
+		userAddress
+	);
+
+	const tradeCooldown: ActiveTradeCooldown | null = resolveActiveTradeCooldown(
+		tradeCooldownStatus,
+		nextBuyAllowedAt
+	);
+
+	const isTradeCooldownActive = isActiveCooldown(tradeCooldown);
+
+	const handleConfirmTrade = async (
 		amount: number,
 		_pricePreview?: unknown,
-		slippage?: { maxPriceStroops: number | null } | null
+		slippage?: { maxPriceStroops?: number | null; minPriceStroops?: number | null } | null
 	) => {
 		setTradeSubmitting(true);
+
+		if (tradeSide === 'sell') {
+			try {
+				showToast.loading(
+					`Submitting sell for ${amount} key${amount === 1 ? '' : 's'}...`
+				);
+
+				await tradeMutation.mutateAsync({
+					creatorId: id || '',
+					amount: -amount,
+					priceStroops: creator
+						? resolveCreatorKeyPriceStroops(creator)
+						: null,
+					price: creator?.price,
+					minPriceStroops: slippage?.minPriceStroops ?? null,
+				});
+
+				showToast.transactionSuccess(
+					'Trade confirmed',
+					`Sold ${formatNumber(amount)} key${
+						amount === 1 ? '' : 's'
+					} from ${creator?.title || 'Creator'}`
+				);
+
+				setBuyDialogOpen(false);
+			} catch (error) {
+				showToast.error(getSignatureErrorMessage(error));
+			} finally {
+				if (id) {
+					invalidateTradeCooldownStatus(queryClient, id);
+				}
+				setTradeSubmitting(false);
+			}
+			return;
+		}
+
 		try {
 			showToast.loading(
 				`Submitting buy for ${amount} key${amount === 1 ? '' : 's'}...`
 			);
+
 			await tradeMutation.mutateAsync({
 				creatorId: id || '',
 				amount,
@@ -172,16 +382,23 @@ function CreatorDetailPageContent() {
 				price: creator?.price,
 				maxPriceStroops: slippage?.maxPriceStroops ?? null,
 			});
+
 			showToast.transactionSuccess(
 				'Trade confirmed',
-				`Bought ${formatNumber(amount)} key${amount === 1 ? '' : 's'} from ${
-					creator?.title || 'Creator'
-				}`
+				`Bought ${formatNumber(amount)} key${
+					amount === 1 ? '' : 's'
+				} from ${creator?.title || 'Creator'}`
 			);
+
 			setBuyDialogOpen(false);
+			setLastPurchasedAmount(amount);
+			setShareModalOpen(true);
 		} catch (error) {
 			showToast.error(getSignatureErrorMessage(error));
 		} finally {
+			if (id) {
+				invalidateTradeCooldownStatus(queryClient, id);
+			}
 			setTradeSubmitting(false);
 		}
 	};
@@ -199,21 +416,25 @@ function CreatorDetailPageContent() {
 	if (error || !creator) {
 		const is404 =
 			!creator || (error instanceof ApiError && error.status === 404);
+
 		if (is404) {
 			return (
 				<main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-[#06111f] px-6 py-16 text-center text-white">
 					<h1 className="font-grotesque text-3xl font-black">
 						Creator not found
 					</h1>
-					<p className="text-white/70 font-jakarta">
+
+					<p className="font-jakarta text-white/70">
 						We couldn't find a creator with that ID.
 					</p>
+
 					<Link to="/creators" className="text-amber-400 hover:underline">
 						Back to creators
 					</Link>
 				</main>
 			);
 		}
+
 		throw error;
 	}
 
@@ -230,10 +451,26 @@ function CreatorDetailPageContent() {
 		},
 	];
 
+	const auctionLeadBid =
+		auctionPhase === 'active'
+			? resolveHighestBid(creator.auctionBids, creator.auctionHighestBid)
+			: null;
+
+	const auctionStatValue =
+		auctionLeadBid != null
+			? formatAuctionBidAmount(auctionLeadBid)
+			: creator.auctionPrice != null && creator.auctionPrice > 0
+				? formatAuctionBidAmount(creator.auctionPrice)
+				: '—';
+
 	const statItems = [
 		{
-			label: 'Current Price',
-			value: formatDisplayKeyPrice(resolveCreatorKeyPriceStroops(creator)),
+			label:
+				auctionPhase === 'active' ? 'Current Highest Bid' : 'Current Price',
+			value:
+				auctionPhase === 'active'
+					? auctionStatValue
+					: formatDisplayKeyPrice(resolveCreatorKeyPriceStroops(creator)),
 		},
 		{
 			label: 'Key Supply',
@@ -261,8 +498,10 @@ function CreatorDetailPageContent() {
 		supply: (index + 1) * 20,
 		priceXLM: priceStroops / 10_000_000,
 	}));
+
 	const spotPrice = resolveCreatorKeyPriceStroops(creator);
 	const twapPrice = twap?.priceStroops ?? null;
+
 	const twapDelta =
 		twapPrice != null && spotPrice != null ? twapPrice - spotPrice : null;
 
@@ -270,6 +509,7 @@ function CreatorDetailPageContent() {
 		creator.stakingPoolBalance != null ||
 		creator.totalStaked != null ||
 		creator.recentFeeInflow != null;
+
 	const stakingStats = hasRealStakingData
 		? {
 				stakingPoolBalance: creator.stakingPoolBalance,
@@ -277,7 +517,6 @@ function CreatorDetailPageContent() {
 				recentFeeInflow: creator.recentFeeInflow,
 			}
 		: {
-				// Demo values until the key detail API returns staking pool stats.
 				stakingPoolBalance: 4820,
 				totalStaked: creator.creatorShareSupply
 					? Math.floor(creator.creatorShareSupply / 4)
@@ -288,12 +527,19 @@ function CreatorDetailPageContent() {
 	return (
 		<main className="min-h-screen bg-[#06111f] px-6 py-16 text-white md:px-12">
 			<div className="mx-auto max-w-7xl space-y-8">
+				{creator.deprecation && !deprecationDismissed && (
+					<DeprecationBanner
+						deprecation={creator.deprecation}
+						onDismiss={() => setDeprecationDismissed(true)}
+					/>
+				)}
+
 				<CreatorBreadcrumb
 					parentLabel="Marketplace"
 					parentHref="/"
 					currentLabel={`${creator.title} Profile`}
 				/>
-				{/* Key deprecation notice & guaranteed buyback flow (#923) */}
+
 				{isKeyDeprecated(creator) && (
 					<KeyDeprecationBanner
 						creator={creator}
@@ -303,23 +549,37 @@ function CreatorDetailPageContent() {
 						recentSettlement={recentSettlement}
 					/>
 				)}
-				{/* Merge proposal voting for source key holders (#983) */}
+
+				<KeyTradingPausedBanner tradingPaused={creator.tradingPaused} />
+
 				<MergeProposalBanner
 					sourceKeyId={id || ''}
 					holdingsCount={holdingsCount}
 					isConnected={Boolean(userAddress)}
 				/>
+
 				<div className="flex items-start gap-3">
-					<div className="min-w-0 flex-1">
+					<div className="min-w-0 flex-1 space-y-2">
+						<CreatorProfileStaleIndicator
+							visible={shouldShowBadge || isFallbackActive}
+							isRefetching={isFetching || isOnChainLoading}
+							onRefresh={() => {
+								void refetch();
+								void refetchOnChainMetadata();
+							}}
+						/>
+
 						<CreatorProfileHeader
-							name={creator.title}
+							name={displayName}
+							symbol={displaySymbol}
 							handle={creator.socialHandle || creator.instructorId}
 							creatorId={creator.id}
 							isVerified={creator.isVerified}
-							avatarUrl={creator.thumbnail}
-							bio={creator.description}
+							avatarUrl={displayAvatar}
+							bio={displayDescription}
 							priceStroops={resolveCreatorKeyPriceStroops(creator)}
 							showBackButton={hasMounted}
+							isOnChainLoading={isOnChainLoading}
 							onBack={() => {
 								if (
 									window.history.length > 1 &&
@@ -328,49 +588,83 @@ function CreatorDetailPageContent() {
 									navigate(-1);
 									return;
 								}
+
 								navigate('/creators');
 							}}
 						/>
 					</div>
+
 					<WatchlistButton
 						creator={creator}
-						labelName={creator.title}
-						className="mt-3 shrink-0"
+						labelName={displayName}
+						className="mt-3 size-11 shrink-0 sm:size-9"
 					/>
 				</div>
-				{/* 4 Stat Cards */}
+
+				{keyFreeze && <KeyFreezeStatusBanner freeze={keyFreeze} />}
+
+				<SectionErrorBoundary sectionName="price history">
+					<PriceHistoryChart
+						data={priceHistory}
+						interval={interval}
+						isLoading={isPriceHistoryLoading}
+						onIntervalChange={setInterval}
+					/>
+				</SectionErrorBoundary>
+
+				{/* Live bonding-curve price chart (#1115) */}
+				<SectionErrorBoundary sectionName="bonding curve price chart">
+					<BondingCurvePriceChart creatorId={id || ''} />
+				</SectionErrorBoundary>
+
 				<div data-testid="creator-stat-cards">
 					<CreatorProfileStatRow items={statItems} />
 				</div>
-				{/* Key Stats Panel (#952) */}
-				<KeyStatsPanel
-					stats={keyStats}
-					isLoading={isKeyStatsLoading}
-					isError={isKeyStatsError}
-				/>
-				{/* Performance Bond Status Panel (#975) */}
-				<PerformanceBondPanel
-					bond={performanceBond}
-					isLoading={isPerformanceBondLoading}
-					isError={isPerformanceBondError}
-				/>
-				{/* Deprecation Notice and Buy Action on Key Detail Page */}
+
+				<SectionErrorBoundary sectionName="key statistics">
+					<KeyStatsPanel
+						stats={keyStats}
+						isLoading={isKeyStatsLoading}
+						isError={isKeyStatsError}
+						uniqueTraders={uniqueTraders}
+						isUniqueTradersLoading={isUniqueTradersLoading}
+					/>
+				</SectionErrorBoundary>
+
+				<SectionErrorBoundary sectionName="performance bond">
+					<PerformanceBondPanel
+						bond={performanceBond}
+						isLoading={isPerformanceBondLoading}
+						isError={isPerformanceBondError}
+					/>
+				</SectionErrorBoundary>
+
 				{isKeyDeprecated(creator) && (
 					<div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4">
 						<DeprecationNotice reason={creator.deprecationReason} />
 					</div>
 				)}
-				<div className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4">
-					<div>
-						<p className="text-xs font-semibold uppercase tracking-wider text-white/55">
-							Key Purchase
-						</p>
+
+				<div className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+					<div className="min-w-0">
+						<div className="flex items-center gap-2">
+							<p className="text-xs font-semibold uppercase tracking-wider text-white/55">
+								Key Purchase
+							</p>
+
+							{isLockedOut && <WhitelistStatusBadge />}
+						</div>
+
 						<p className="mt-0.5 text-sm text-white/80">
 							{isKeyDeprecated(creator)
 								? 'Key is deprecated. New buys are disabled.'
-								: 'Purchase keys for this creator.'}
+								: keyFreeze
+									? keyFreeze.reason
+									: buyDisabledReason
+										? buyDisabledReason
+										: 'Purchase keys for this creator.'}
 						</p>
-						{/* Configurable bid-ask spread between buy and sell price (#951) */}
+
 						<SpreadIndicator
 							className="mt-2"
 							buyPriceStroops={keyConfig?.buyPriceStroops}
@@ -379,7 +673,7 @@ function CreatorDetailPageContent() {
 							spreadBps={keyConfig?.spreadBps}
 							isLoading={isKeyConfigLoading}
 						/>
-						{/* Oracle reference price next to the curve spot price (#967) */}
+
 						<OraclePriceIndicator
 							className="mt-2"
 							comparison={oracleComparison}
@@ -387,24 +681,160 @@ function CreatorDetailPageContent() {
 							source={oracleSource}
 							isLoading={isOracleLoading}
 						/>
+
+						{creator.earlyAccessEnabled && (
+							<span className="mt-2 inline-flex items-center rounded-full border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-xs font-bold text-amber-200">
+								Early access
+							</span>
+						)}
+
+						{creator.publicLaunchDate && hasValidPublicLaunchDate && (
+							<p className="mt-2 text-sm text-white/70">
+								{isPublicLaunchPending
+									? 'Public launch: '
+									: 'Public trading is open. '}
+
+								{isPublicLaunchPending && (
+									<time dateTime={creator.publicLaunchDate}>
+										{new Date(
+											creator.publicLaunchDate
+										).toLocaleString()}
+									</time>
+								)}
+							</p>
+						)}
 					</div>
-					<Button
-						disabled={isKeyDeprecated(creator)}
-						data-testid="key-detail-buy-button"
-						onClick={() => setBuyDialogOpen(true)}
-						variant={isKeyDeprecated(creator) ? 'outline' : 'default'}
-						className="rounded-xl font-bold"
-					>
-						{isKeyDeprecated(creator)
-							? 'Buy Disabled (Deprecated)'
-							: 'Buy Key'}
-					</Button>
+
+					<div className="flex items-center gap-2">
+						<AddToBundleButton
+							keyId={creator.id}
+							keyName={displayName}
+							priceStroops={resolveCreatorKeyPriceStroops(creator) ?? 0}
+							currentSupply={creator.creatorShareSupply ?? null}
+							thumbnail={displayAvatar ?? undefined}
+							disabled={Boolean(keyFreeze)}
+							disabledReason={keyFreeze?.reason}
+							className="min-h-11 w-full sm:h-10 sm:min-h-0 sm:w-auto"
+						/>
+
+						<PriceAlertButton
+							userId={userAddress}
+							keyId={creator.id}
+							keyName={creator.title || creator.name || 'Creator Key'}
+							currentPrice={resolveCreatorKeyPriceStroops(creator) ?? 0}
+						/>
+
+						{isKeyDeprecated(creator) ? (
+							<Button
+								disabled
+								data-testid="key-detail-buy-button"
+								variant="outline"
+								className="min-h-11 w-full rounded-xl font-bold sm:h-10 sm:min-h-0 sm:w-auto"
+							>
+								Buy Disabled (Deprecated)
+							</Button>
+						) : keyFreeze ? (
+							<UnavailableAction disabled reason={keyFreeze.reason}>
+								<Button
+									type="button"
+									data-testid="key-detail-buy-button"
+									className="min-h-11 w-full rounded-xl bg-amber-400 font-bold text-slate-950 hover:bg-amber-300 sm:h-10 sm:min-h-0 sm:w-auto"
+								>
+									Buy Key
+								</Button>
+							</UnavailableAction>
+						) : creator.tradingPaused ? (
+							<UnavailableAction disabled reason="Trading is currently paused">
+								<Button
+									type="button"
+									data-testid="key-detail-buy-button"
+									className="min-h-11 w-full rounded-xl bg-amber-400 font-bold text-slate-950 hover:bg-amber-300 sm:h-10 sm:min-h-0 sm:w-auto"
+								>
+									Buy Key
+								</Button>
+							</UnavailableAction>
+						) : buyDisabledReason ? (
+							<Tooltip content={buyDisabledReason}>
+								<span
+									className="inline-flex w-full sm:w-auto"
+									tabIndex={0}
+								>
+									<Button
+										type="button"
+										disabled
+										data-testid="key-detail-buy-button"
+										className="min-h-11 w-full rounded-xl bg-amber-400 font-bold text-slate-950 hover:bg-amber-300 sm:h-10 sm:min-h-0 sm:w-auto"
+									>
+										Buy Key
+									</Button>
+								</span>
+							</Tooltip>
+						) : (
+							<TradeCooldownButton
+								cooldown={tradeCooldown}
+								label="Buy Key"
+								className="min-h-11 w-full rounded-xl font-bold sm:h-10 sm:min-h-0 sm:w-auto"
+								onClick={() => {
+								setTradeSide('buy');
+								setBuyDialogOpen(true);
+							}}
+								buttonProps={{
+									'data-testid': 'key-detail-buy-button',
+								}}
+							/>
+						)}
+
+						{holdingsCount > 0 && (
+							isFloorActive ? (
+								<UnavailableAction
+									disabled
+									reason="PriceFloorActive: Price floor is active. Selling is disabled while current price is at or below the floor price."
+								>
+									<Button
+										type="button"
+										disabled
+										data-testid="key-detail-sell-button"
+										variant="outline"
+										className="min-h-11 w-full rounded-xl font-bold sm:h-10 sm:min-h-0 sm:w-auto"
+									>
+										Sell Key
+									</Button>
+								</UnavailableAction>
+							) : (
+								<Button
+									type="button"
+									data-testid="key-detail-sell-button"
+									variant="outline"
+									className="min-h-11 w-full rounded-xl font-bold sm:h-10 sm:min-h-0 sm:w-auto"
+									onClick={() => {
+										setTradeSide('sell');
+										setBuyDialogOpen(true);
+									}}
+								>
+									Sell Key
+								</Button>
+							)
+						)}
+					</div>
 				</div>
-				{/* Buy Cooldown Countdown (only meaningful for authenticated users) */}
-				{userAddress && (
+
+				{auctionPhase !== 'inactive' && (
+					<AuctionPhaseSection
+						creatorId={creator.id}
+						auctionPrice={creator.auctionPrice}
+						auctionSupply={creator.auctionSupply}
+						auctionSold={creator.auctionSold}
+						auctionEndsAt={creator.auctionEndsAt}
+						auctionMinIncrement={creator.auctionMinIncrement}
+						auctionHighestBid={creator.auctionHighestBid}
+						auctionBids={creator.auctionBids}
+					/>
+				)}
+
+				{userAddress && !isTradeCooldownActive && (
 					<BuyCooldownCountdown nextBuyAllowedAt={nextBuyAllowedAt} />
 				)}
-				{/* Share to X Button (only visible for authenticated holders) */}
+
 				<div className="flex justify-end">
 					<ShareTwitterButton
 						creatorId={creator.id}
@@ -414,14 +844,19 @@ function CreatorDetailPageContent() {
 						).replace(' XLM', '')}
 						userAddress={userAddress}
 						userHoldingsCount={holdingsCount}
+						onClick={() => {
+							setLastPurchasedAmount(holdingsCount);
+							setShareModalOpen(true);
+						}}
 					/>
 				</div>
+
 				{isTwapLoading ? (
 					<div
 						className="rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4"
 						data-testid="twap-price"
 					>
-						<div aria-label="Loading 24 hour TWAP" role="status">
+						<div aria-label={`Loading ${twapWindow === '1h' ? '1 hour' : '24 hour'} TWAP`} role="status">
 							<Skeleton className="h-3 w-24" />
 							<Skeleton className="mt-2 h-6 w-32" />
 						</div>
@@ -431,7 +866,7 @@ function CreatorDetailPageContent() {
 						className="rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4"
 						data-testid="twap-price"
 					>
-						<div className="flex items-center justify-between gap-4">
+						<div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
 							<div>
 								<div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-white/55">
 									<span
@@ -443,28 +878,31 @@ function CreatorDetailPageContent() {
 												: ''
 										}
 									>
-										TWAP (24h)
+										TWAP ({twapWindow})
 									</span>
-									<Tooltip content="Time-weighted average price over the past 24 hours. Less sensitive to short-term manipulation.">
+
+									<Tooltip content={`Time-weighted average price over the past ${twapWindow === '1h' ? '1 hour' : '24 hours'}. Less sensitive to short-term manipulation.`}>
 										<button
 											type="button"
-											aria-label="What is 24 hour TWAP?"
-											className="text-white/50"
+											aria-label={`What is ${twapWindow === '1h' ? '1 hour' : '24 hour'} TWAP?`}
+											className="-m-1 p-1 text-white/50"
 										>
 											ⓘ
 										</button>
 									</Tooltip>
 								</div>
+
 								<div className="mt-1 text-xl font-bold text-white">
 									{formatDisplayKeyPrice(twapPrice)}
 								</div>
 							</div>
+
 							{twapDelta != null && (
 								<span
 									className={
 										twapDelta < 0
-											? 'text-sm font-semibold text-emerald-400'
-											: 'text-sm font-semibold text-rose-400'
+											? 'text-sm font-semibold tabular-nums text-emerald-400'
+											: 'text-sm font-semibold tabular-nums text-rose-400'
 									}
 								>
 									{twapDelta < 0 ? '▼' : '▲'}{' '}
@@ -474,91 +912,171 @@ function CreatorDetailPageContent() {
 						</div>
 					</div>
 				) : null}
-				{/* Staking Rewards */}
+
 				<StakingRewardsSection {...stakingStats} isLoading={isLoading} />
-				{/* Price Chart */}
-				<div
-					className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8"
-					data-testid="creator-chart-container"
-				>
-					<h2 className="font-grotesque text-xl font-black tracking-tight text-white mb-6">
-						Price Curve
-					</h2>
-				<BondingCurveChart
-					data={chartData}
-					currentSupply={creator.creatorShareSupply ?? 100}
-					height={300}
+
+				{/* Staking Vault — stake keys, track locks, claim rewards (#1017) */}
+				<StakingVaultPanel
+					keyId={id ?? ''}
+					userAddress={userAddress}
+					availableBalance={holdingsCount}
+					rewardPoolBalance={stakingStats.stakingPoolBalance ?? 0}
+					isLoading={isLoading}
 				/>
-				</div>
-				<GraduatedCurveMilestoneChart
-					keyId={creator.id}
-					currentSupply={creator.creatorShareSupply ?? 0}
-				/>
-				{/* Buy Simulation Tool */}
-				<KeySimulationTool
-					currentSupply={creator.creatorShareSupply ?? 100}
-					protocolFeeBps={creator.protocolFeeBps}
-					creatorFeeBps={creator.creatorFeeBps}
-				/>
-				{/* Holder Concentration */}
+
+				<SectionErrorBoundary sectionName="graduation">
+					<GraduationCelebration
+						keyId={creator.id}
+						keyName={creator.title || creator.name || 'This key'}
+						currentSupply={creator.creatorShareSupply}
+						holderCount={holders.length > 0 ? holders.length : null}
+						walletAddress={connectedWalletAddress}
+					/>
+				</SectionErrorBoundary>
+
+				{auctionPhase !== 'active' && (
+					<>
+						<div
+							className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8"
+							data-testid="creator-chart-container"
+						>
+							<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
+								Price Curve
+							</h2>
+
+							<BondingCurveChart
+								data={chartData}
+								currentSupply={creator.creatorShareSupply ?? 100}
+								currentPriceStroops={spotPrice ?? undefined}
+								spotPriceStroops={spotPrice}
+								twapPriceStroops={twapPrice}
+								twapWindow={twapWindow}
+								onTwapWindowChange={setTwapWindow}
+								isTwapLoading={isTwapLoading}
+								priceFloorStroops={priceFloorStroops}
+								height={300}
+							/>
+						</div>
+
+						<SectionErrorBoundary sectionName="curve milestones">
+							<GraduatedCurveMilestoneChart
+								keyId={creator.id}
+								currentSupply={creator.creatorShareSupply ?? 0}
+							/>
+						</SectionErrorBoundary>
+
+						<KeySimulationTool
+							currentSupply={creator.creatorShareSupply ?? 100}
+							protocolFeeBps={creator.protocolFeeBps}
+							creatorFeeBps={creator.creatorFeeBps}
+						/>
+					</>
+				)}
 				<div
 					className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8"
 					data-testid="holder-concentration-container"
 				>
-					<h2 className="font-grotesque text-xl font-black tracking-tight text-white mb-6">
+					<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
 						Holder Concentration
 					</h2>
-					<HolderConcentrationChart
-						holders={holders}
-						totalSupply={creator.creatorShareSupply}
-					/>
+
+					<SectionErrorBoundary sectionName="holder concentration">
+						<HolderConcentrationChart
+							holders={holders}
+							totalSupply={creator.creatorShareSupply}
+						/>
+					</SectionErrorBoundary>
 				</div>
-				{/* Fee Structure */}
+
+				<div
+					className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8"
+					data-testid="holder-snapshot-history-container"
+				>
+					<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
+						Holder Snapshot History
+					</h2>
+
+					<SectionErrorBoundary sectionName="holder snapshot history">
+						<HolderSnapshotHistory keyId={creator.id} />
+					</SectionErrorBoundary>
+				</div>
+
 				<div className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8">
-					<div className="flex items-center justify-between gap-4 mb-6">
+					<div className="mb-6 flex items-center justify-between gap-4">
 						<h2 className="font-grotesque text-xl font-black tracking-tight text-white">
 							Fee Structure
 						</h2>
+
 						<CreatorProfileStaleIndicator
 							visible={shouldShowBadge}
-							isRefetching={isFetching}
+							isRefetching={isFetching || isOnChainLoading}
 							onRefresh={handleRefetch}
 						/>
 					</div>
+
 					<CreatorProfileInfoGrid items={feeItems} />
 				</div>
-				{/* Co-Creator Section */}{' '}
-				<CoCreatorSection
-					courseId={creator.id}
-					coCreatorAddress={creator.coCreatorAddress}
-					coCreatorSplitBps={creator.coCreatorSplitBps}
-					totalPaidToCoCreator={creator.totalPaidToCoCreator}
-					totalPaidToCreator={creator.totalPaidToCreator}
-				/>
-				{/* Key Holders */}
+
+				<SectionErrorBoundary sectionName="co-creator information">
+					<CoCreatorSection
+						courseId={creator.id}
+						coCreatorAddress={creator.coCreatorAddress}
+						coCreatorSplitBps={creator.coCreatorSplitBps}
+						totalPaidToCoCreator={creator.totalPaidToCoCreator}
+						totalPaidToCreator={creator.totalPaidToCreator}
+					/>
+				</SectionErrorBoundary>
+
 				<div
 					data-testid="creator-holders-container"
 					className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8"
 				>
-					<h2 className="font-grotesque text-xl font-black tracking-tight text-white mb-6">
+					<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
 						Key Holders
 					</h2>
-					<KeyHolderList
-						holders={holders}
-						hasNextPage={hasNextPage}
-						isFetchingNextPage={isFetchingNextPage}
-						fetchNextPage={() => {
-							void fetchNextPage();
-						}}
-					/>
+
+					<SectionErrorBoundary sectionName="key holders">
+						<KeyHolderList
+							holders={holders}
+							hasNextPage={hasNextPage}
+							isFetchingNextPage={isFetchingNextPage}
+							fetchNextPage={() => {
+								void fetchNextPage();
+							}}
+						/>
+					</SectionErrorBoundary>
 				</div>
+
+				<div className="rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8">
+					<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
+						Exclusive Content
+					</h2>
+
+					<SubscriptionAccessGate
+						creatorId={creator.id}
+						minimumHolding={1}
+						onBuyClick={() => setBuyDialogOpen(true)}
+					>
+						<div className="rounded-xl border border-white/10 bg-white/[0.03] p-6">
+							<p className="text-white/80">
+								🎉 Welcome to the exclusive content section! Here you
+								can access premium videos, articles, and perks from{' '}
+								{creator.title || creator.name || 'this creator'}.
+							</p>
+						</div>
+					</SubscriptionAccessGate>
+				</div>
+
 				<div className="mt-8 rounded-[2rem] border border-white/10 bg-white/[0.02] p-6 shadow-2xl backdrop-blur-md md:p-8">
-					<h2 className="font-grotesque text-xl font-black tracking-tight text-white mb-6">
+					<h2 className="mb-6 font-grotesque text-xl font-black tracking-tight text-white">
 						Activity
 					</h2>
-					<CreatorActivityFeed creatorId={creator.id} />
+
+					<SectionErrorBoundary sectionName="creator activity">
+						<CreatorActivityFeed creatorId={creator.id} />
+					</SectionErrorBoundary>
 				</div>
-				{/* Key Buyback Modal (#923) */}
+
 				{isKeyDeprecated(creator) && (
 					<KeyBuybackModal
 						open={buybackModalOpen}
@@ -566,7 +1084,9 @@ function CreatorDetailPageContent() {
 						creatorId={creator.id}
 						creatorTitle={creator.title || creator.name || 'Creator Key'}
 						holdingsCount={holdingsCount}
-						buybackPriceStroops={resolveCreatorKeyPriceStroops(creator) ?? 0}
+						buybackPriceStroops={
+							resolveCreatorKeyPriceStroops(creator) ?? 0
+						}
 						userAddress={userAddress}
 						onSettled={receipt => {
 							setRecentSettlement(receipt);
@@ -577,7 +1097,7 @@ function CreatorDetailPageContent() {
 				{creator && (
 					<TradeDialog
 						open={buyDialogOpen}
-						side="buy"
+						side={tradeSide}
 						creatorName={creator.title || creator.name || 'Creator'}
 						availableHoldings={holdingsCount}
 						keyPriceStroops={resolveCreatorKeyPriceStroops(creator)}
@@ -587,9 +1107,31 @@ function CreatorDetailPageContent() {
 						keyConfig={keyConfig}
 						isKeyConfigLoading={isKeyConfigLoading}
 						onOpenChange={setBuyDialogOpen}
-						onConfirm={handleConfirmBuy}
+						onConfirm={handleConfirmTrade}
 						isSubmitting={tradeSubmitting}
 						requireConfirmation={true}
+						tradingPaused={creator.tradingPaused}
+						keyFreeze={keyFreeze}
+						priceFloorStroops={priceFloorStroops}
+						priceFloorActive={isFloorActive}
+					/>
+				)}
+
+				{creator && (
+					<ShareModal
+						open={shareModalOpen}
+						onOpenChange={setShareModalOpen}
+						creatorId={creator.id}
+						creatorName={creator.title || creator.name || 'Creator'}
+						amount={
+							lastPurchasedAmount ??
+							(holdingsCount > 0 ? holdingsCount : null)
+						}
+						priceXlm={formatDisplayKeyPrice(
+							resolveCreatorKeyPriceStroops(creator)
+						).replace(' XLM', '')}
+						userAddress={userAddress}
+						onDismiss={() => setShareModalOpen(false)}
 					/>
 				)}
 			</div>
